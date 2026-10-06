@@ -1,6 +1,6 @@
-/** /ferment 发酵比重与双乙酰还原跟踪：趋势读数与超温标记 */
+/** /ferment 发酵比重与双乙酰还原跟踪：趋势读数与超温标记、多标签页合并冲突与失败草稿处理 */
 import { CommonModule } from '@angular/common';
-import { ChangeDetectionStrategy, Component, OnInit, computed, inject } from '@angular/core';
+import { ChangeDetectionStrategy, Component, OnInit, effect, inject } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { MatButtonModule } from '@angular/material/button';
 import { MatCardModule } from '@angular/material/card';
@@ -21,6 +21,8 @@ import {
   FERMENT_STATES,
   type Ferment
 } from '../../core/models/ferment.model';
+import { formatConflictSideValue, type FermentConflictSide } from '../../core/models/ferment-conflict.model';
+import { FERMENT_MUTATION_KIND_LABELS } from '../../core/models/ferment-draft.model';
 import {
   filtersToQueryParams,
   queryParamsToFilters,
@@ -33,11 +35,15 @@ import {
   selectBatchNumbers,
   selectCurrentBatchFerments,
   selectCurrentBatchMetrics,
+  selectFermentDrafts,
   selectFermentFilter,
+  selectFermentNotice,
+  selectPendingConflicts,
   selectSelectedBatchNo
 } from '../../core/state/ferment/ferment.selectors';
 import { selectAllRecipes, selectSelectedRecipeId } from '../../core/state/recipe/recipe.selectors';
 import { RecipeActions } from '../../core/state/recipe/recipe.actions';
+import type { FermentRow } from '../../core/utils/db';
 
 @Component({
   selector: 'app-ferment-trend',
@@ -80,7 +86,71 @@ import { RecipeActions } from '../../core/state/recipe/recipe.actions';
         <app-stat-badge label="表观发酵度" [value]="metrics().attenuation" suffix="%" tone="success" icon="percent" />
         <app-stat-badge label="估算 ABV" [value]="metrics().abv" suffix="%vol" tone="warning" icon="local_bar" />
         <app-stat-badge label="超温天数" [value]="metrics().overTempDays" suffix="天" tone="danger" icon="thermostat" />
+        <app-stat-badge label="待处理冲突" [value]="conflicts().length" suffix="起" tone="danger" icon="sync_problem" />
+        <app-stat-badge label="失败草稿" [value]="drafts().length" suffix="份" tone="warning" icon="drafts" />
       </div>
+
+      @if (conflicts().length > 0) {
+        <mat-card appearance="outlined" class="sync-card sync-card--conflict">
+          <mat-card-header>
+            <mat-card-title>待处理合并冲突（{{ conflicts().length }}）</mat-card-title>
+            <mat-card-subtitle>两个标签页改动了同批次同天的读数，双方值与来源都已保留，请选择采用哪一侧。</mat-card-subtitle>
+          </mat-card-header>
+          <mat-card-content>
+            @for (conflict of conflicts(); track conflict.id) {
+              <div class="sync-item">
+                <div class="sync-item__head">
+                  <strong>批次 {{ conflict.batchNo }} · {{ conflict.date }}</strong>
+                </div>
+                <div class="sync-item__sides">
+                  <div class="sync-side">
+                    <span class="sync-side__tag">库中保留</span>
+                    <span>{{ sideText(conflict.kept) }}</span>
+                    <span class="muted">{{ conflict.kept.source }} · {{ conflict.kept.at | date: 'MM-dd HH:mm:ss' }}</span>
+                  </div>
+                  <div class="sync-side">
+                    <span class="sync-side__tag sync-side__tag--incoming">另一来源</span>
+                    <span>{{ sideText(conflict.incoming) }}</span>
+                    <span class="muted">
+                      {{ conflict.incoming.source }} · {{ conflict.incoming.at | date: 'MM-dd HH:mm:ss' }}
+                    </span>
+                  </div>
+                </div>
+                <div class="sync-item__actions">
+                  <button mat-stroked-button type="button" (click)="resolveConflict(conflict.id, 'kept')">保留库中值</button>
+                  <button mat-flat-button color="primary" type="button" (click)="resolveConflict(conflict.id, 'incoming')">
+                    采用另一来源
+                  </button>
+                </div>
+              </div>
+            }
+          </mat-card-content>
+        </mat-card>
+      }
+
+      @if (drafts().length > 0) {
+        <mat-card appearance="outlined" class="sync-card sync-card--draft">
+          <mat-card-header>
+            <mat-card-title>写入失败草稿（{{ drafts().length }}）</mat-card-title>
+            <mat-card-subtitle>整组写入已回滚，操作意图完整保留；可继续合并，重开页面后依然有效。</mat-card-subtitle>
+          </mat-card-header>
+          <mat-card-content>
+            @for (draft of drafts(); track draft.id) {
+              <div class="sync-item">
+                <div class="sync-item__head">
+                  <strong>{{ kindLabel(draft.kind) }} · 批次 {{ draft.batchNo || '未知' }} · {{ draft.date || '未知日期' }}</strong>
+                  <span class="muted">{{ draft.createdAt | date: 'MM-dd HH:mm:ss' }} · {{ draft.source }}</span>
+                </div>
+                <div class="sync-item__error">失败原因：{{ draft.error }}</div>
+                <div class="sync-item__actions">
+                  <button mat-flat-button color="primary" type="button" (click)="retryDraft(draft.id)">继续合并</button>
+                  <button mat-button color="warn" type="button" (click)="discardDraft(draft.id)">丢弃</button>
+                </div>
+              </div>
+            }
+          </mat-card-content>
+        </mat-card>
+      }
 
       <mat-card appearance="outlined">
         <mat-card-content>
@@ -288,6 +358,55 @@ import { RecipeActions } from '../../core/state/recipe/recipe.actions';
         color: #c0392b;
         font-weight: 700;
       }
+      .sync-card--conflict {
+        border-color: #c0392b;
+      }
+      .sync-card--draft {
+        border-color: #d9a441;
+      }
+      .sync-item {
+        border-top: 1px dashed var(--brew-border);
+        padding: 10px 0;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .sync-item__head {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: baseline;
+        gap: 10px;
+      }
+      .sync-item__sides {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+        gap: 8px;
+      }
+      .sync-side {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        background: #f7f7f2;
+        border-radius: 8px;
+        padding: 8px 10px;
+        font-size: 13px;
+      }
+      .sync-side__tag {
+        font-size: 11px;
+        font-weight: 700;
+        color: #2f5a24;
+      }
+      .sync-side__tag--incoming {
+        color: #7a4a12;
+      }
+      .sync-item__error {
+        font-size: 12px;
+        color: #a5281b;
+      }
+      .sync-item__actions {
+        display: flex;
+        gap: 8px;
+      }
     `
   ]
 })
@@ -306,6 +425,9 @@ export class FermentTrendComponent implements OnInit {
   readonly recipes = this.store.selectSignal(selectAllRecipes);
   readonly selectedRecipeId = this.store.selectSignal(selectSelectedRecipeId);
   readonly allFerments = this.store.selectSignal(selectAllFerments);
+  readonly conflicts = this.store.selectSignal(selectPendingConflicts);
+  readonly drafts = this.store.selectSignal(selectFermentDrafts);
+  private readonly notice = this.store.selectSignal(selectFermentNotice);
 
   readonly currentReadings = this.store.selectSignal(selectCurrentBatchFerments);
 
@@ -315,7 +437,20 @@ export class FermentTrendComponent implements OnInit {
 
   formVisible = false;
   editingId: string | null = null;
+  /** 编辑开始时该行在库中的 updatedAt，作为并发检测基准随保存一起提交 */
+  private editingBaseUpdatedAt: number | null = null;
   form: Omit<Ferment, 'id'> = createEmptyFerment();
+
+  constructor() {
+    // 合并冲突产生、草稿留存等一次性提示
+    effect(() => {
+      const notice = this.notice();
+      if (notice) {
+        this.snack.open(notice, '关闭', { duration: 3600 });
+        this.store.dispatch(FermentActions.clearNotice());
+      }
+    });
+  }
 
   ngOnInit(): void {
     this.store.dispatch(RecipeActions.reloadAll());
@@ -348,14 +483,16 @@ export class FermentTrendComponent implements OnInit {
 
   openCreate(): void {
     this.editingId = null;
+    this.editingBaseUpdatedAt = null;
     this.form = createEmptyFerment();
     this.form.recipeId = this.selectedRecipeId() ?? this.recipes()[0]?.id ?? '';
     this.form.batchNo = this.selectedBatchNo() ?? '';
     this.formVisible = true;
   }
 
-  edit(reading: Ferment): void {
+  edit(reading: FermentRow): void {
     this.editingId = reading.id;
+    this.editingBaseUpdatedAt = reading.updatedAt;
     this.form = {
       batchNo: reading.batchNo,
       recipeId: reading.recipeId,
@@ -378,7 +515,13 @@ export class FermentTrendComponent implements OnInit {
       return;
     }
     if (this.editingId) {
-      this.store.dispatch(FermentActions.updateFerment({ id: this.editingId, patch: { ...this.form } }));
+      this.store.dispatch(
+        FermentActions.updateFerment({
+          id: this.editingId,
+          patch: { ...this.form },
+          baseUpdatedAt: this.editingBaseUpdatedAt
+        })
+      );
     } else {
       this.store.dispatch(FermentActions.createFerment({ payload: { ...this.form } }));
     }
@@ -386,9 +529,31 @@ export class FermentTrendComponent implements OnInit {
     this.store.dispatch(FermentActions.selectBatch({ batchNo: this.form.batchNo }));
   }
 
-  remove(reading: Ferment): void {
+  remove(reading: FermentRow): void {
     if (!window.confirm(`删除 ${reading.date} 的读数？`)) return;
-    this.store.dispatch(FermentActions.deleteFerment({ id: reading.id }));
+    this.store.dispatch(FermentActions.deleteFerment({ id: reading.id, baseUpdatedAt: reading.updatedAt }));
+  }
+
+  /** 冲突处理：保留库中值或采用另一来源 */
+  resolveConflict(id: string, choice: 'kept' | 'incoming'): void {
+    this.store.dispatch(FermentActions.resolveConflict({ id, choice }));
+  }
+
+  /** 失败草稿：继续合并（重开页面后依然有效） */
+  retryDraft(id: string): void {
+    this.store.dispatch(FermentActions.retryDraft({ id }));
+  }
+
+  discardDraft(id: string): void {
+    this.store.dispatch(FermentActions.discardDraft({ id }));
+  }
+
+  sideText(side: FermentConflictSide): string {
+    return formatConflictSideValue(side.value);
+  }
+
+  kindLabel(kind: keyof typeof FERMENT_MUTATION_KIND_LABELS): string {
+    return FERMENT_MUTATION_KIND_LABELS[kind];
   }
 
   onFilterChange(next: FilterModel): void {

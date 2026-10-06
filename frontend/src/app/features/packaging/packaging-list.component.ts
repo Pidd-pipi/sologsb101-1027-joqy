@@ -240,6 +240,10 @@ import { abvFromGravity } from '../../core/utils/brew';
                   <th>发酵读数 / 罐装批次</th>
                   <td>{{ counts['ferments'] || 0 }} / {{ counts['packagings'] || 0 }}</td>
                 </tr>
+                <tr>
+                  <th>冲突记录 / 失败草稿</th>
+                  <td>{{ counts['fermentConflicts'] || 0 }} / {{ counts['fermentDrafts'] || 0 }}</td>
+                </tr>
               </tbody>
             </table>
             <div class="archive-actions">

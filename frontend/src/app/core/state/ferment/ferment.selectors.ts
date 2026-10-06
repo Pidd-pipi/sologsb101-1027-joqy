@@ -10,6 +10,11 @@ export const selectAllFerments = createSelector(selectFermentState, (state) => s
 export const selectFermentFilter = createSelector(selectFermentState, (state) => state.filter);
 export const selectSelectedBatchNo = createSelector(selectFermentState, (state) => state.batchNo);
 export const selectFermentError = createSelector(selectFermentState, (state) => state.error);
+export const selectFermentNotice = createSelector(selectFermentState, (state) => state.notice);
+export const selectFermentDrafts = createSelector(selectFermentState, (state) => state.drafts);
+export const selectPendingConflicts = createSelector(selectFermentState, (state) =>
+  state.conflicts.filter((item) => item.state === '待处理')
+);
 
 /** 全部批次号（去重） */
 export const selectBatchNumbers = createSelector(selectAllFerments, (ferments) =>

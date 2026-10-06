@@ -2,7 +2,7 @@
 import { createActionGroup, emptyProps, props } from '@ngrx/store';
 import type { FilterModel } from '../../models/filter.model';
 import type { Ferment } from '../../models/ferment.model';
-import type { FermentRow } from '../../utils/db';
+import type { FermentConflictRow, FermentDraftRow, FermentRow } from '../../utils/db';
 
 export const FermentActions = createActionGroup({
   source: 'Ferment',
@@ -10,11 +10,18 @@ export const FermentActions = createActionGroup({
     'Load Ferments': emptyProps(),
     'Load Ferments Success': props<{ ferments: FermentRow[] }>(),
     'Load Ferments Failure': props<{ error: string }>(),
+    'Load Sync Success': props<{ conflicts: FermentConflictRow[]; drafts: FermentDraftRow[] }>(),
+    'Mutation Failure': props<{ error: string }>(),
+    'Sync Notice': props<{ notice: string }>(),
+    'Clear Notice': emptyProps(),
     'Set Filter': props<{ filter: FilterModel }>(),
     'Reset Filter': emptyProps(),
     'Select Batch': props<{ batchNo: string | null }>(),
     'Create Ferment': props<{ payload: Omit<Ferment, 'id'> }>(),
-    'Update Ferment': props<{ id: string; patch: Partial<Ferment> }>(),
-    'Delete Ferment': props<{ id: string }>()
+    'Update Ferment': props<{ id: string; patch: Partial<Ferment>; baseUpdatedAt: number | null }>(),
+    'Delete Ferment': props<{ id: string; baseUpdatedAt: number | null }>(),
+    'Resolve Conflict': props<{ id: string; choice: 'kept' | 'incoming' }>(),
+    'Retry Draft': props<{ id: string }>(),
+    'Discard Draft': props<{ id: string }>()
   }
 });

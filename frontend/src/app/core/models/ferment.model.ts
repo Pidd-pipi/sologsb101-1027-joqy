@@ -18,6 +18,8 @@ export interface Ferment {
   diacetylPpm: number;
   /** 阶段 */
   state: FermentState;
+  /** 最后写入来源（标签页标识，合并冲突时用于展示双方来源） */
+  source?: string;
 }
 
 export const FERMENT_STATES: FermentState[] = ['主发酵', '双乙酰还原', '已结束'];

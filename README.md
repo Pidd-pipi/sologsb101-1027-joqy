@@ -69,7 +69,7 @@ npm run build      # ng build，产物在 frontend/dist/gbbrewhouse/browser
 | `/ingredients` | 麦芽与酒花辅料库 | Malt、Hop、Recipe | 按色度、α 酸、产地筛选，调整配比后自动重算加权平均色度与总投料量，麦芽色度色块预览 |
 | `/mash` | 糖化升温步编排与洗糟 | MashStep、Recipe | **Angular CDK 拖拽调序**（含上下移按钮）、逐条签署完成、进度与总水量统计 |
 | `/boil` | 煮沸投花时间表 | BoilAdd、Hop、Recipe | 按投加时点倒计时排序、**高亮下一投加点**、按 α 酸估算 IBU 并与目标 IBU 比对 |
-| `/ferment` | 发酵比重与双乙酰还原 | Ferment、Recipe | 批次切换、逐日录入比重/温度/双乙酰、**趋势条（超温标红）**、双乙酰低于阈值提示还原完成、停滞判定 |
+| `/ferment` | 发酵比重与双乙酰还原 | Ferment、Recipe | 批次切换、逐日录入比重/温度/双乙酰、**趋势条（超温标红）**、双乙酰低于阈值提示还原完成、停滞判定、**多标签页合并冲突处理与失败草稿续合** |
 | `/packaging` | 罐装批次登记与结构版本导出 | Packaging 及全部模型 | 由发酵读数自动带出 OG/FG 与 ABV、配方实绩档案导出、本地库版本查看与整库 JSON 导入导出 |
 
 ---
@@ -92,8 +92,8 @@ sologsb101-1027/
         ├── index.html  main.ts  styles.css
         └── app/
             ├── app.component.ts  app.config.ts  app.routes.ts
-            ├── core/models/         recipe malt hop mash-step boil-add ferment packaging（+ filter）
-            ├── core/services/       recipe.service.ts gravity-trend.service.ts idb-table.service.ts
+            ├── core/models/         recipe malt hop mash-step boil-add ferment packaging ferment-conflict ferment-draft（+ filter）
+            ├── core/services/       recipe.service.ts ferment-sync.service.ts gravity-trend.service.ts idb-table.service.ts
             ├── core/state/          recipe/{actions,reducer,selectors,effects}
             │                        ferment/{actions,reducer,selectors,effects}
             │                        ingredients/ mash/ boil/ packaging/（各 actions + reducer + selectors）
@@ -106,9 +106,12 @@ sologsb101-1027/
 
 ## 六、数据存储说明
 
-- **IndexedDB 库名**：`gbbrewhouse-db`（Dexie 封装），结构版本号 `version(1)`，并带 `upgrade()` 迁移逻辑（为历史行补齐行修订号与时间戳）。
-- **分表存储**：`recipes` 配方、`malts` 麦芽、`hops` 酒花、`mashSteps` 糖化步、`boilAdds` 煮沸投加、`ferments` 发酵读数、`packagings` 罐装批次，共 7 张表；每行带 `revision` / `createdAt` / `updatedAt`。
+- **IndexedDB 库名**：`gbbrewhouse-db`（Dexie 封装），结构版本号 `version(2)`，并带 `upgrade()` 迁移逻辑（v1 为历史行补齐行修订号与时间戳，v2 新增合并冲突与失败草稿两张表）。
+- **分表存储**：`recipes` 配方、`malts` 麦芽、`hops` 酒花、`mashSteps` 糖化步、`boilAdds` 煮沸投加、`ferments` 发酵读数、`packagings` 罐装批次、`fermentConflicts` 合并冲突、`fermentDrafts` 写入失败草稿，共 9 张表；每行带 `revision` / `createdAt` / `updatedAt`。
+- **多标签页合并**：发酵读数按「批次号 + 日期」守住同一份实绩。两个标签页同时改动同一批次某天读数时，双方值与来源（标签页标识 + 时间）都保留进 `fermentConflicts`，未冲突的读数直接合并；跨标签页写入用 Web Locks 串行化，本库变化经 Dexie liveQuery 广播到所有标签页即时重载。
+- **实绩联动**：任一读数改动后，合并器在同一事务内按该批次首末读数重算罐装批次 ABV，配方实绩（OG/FG、发酵度）随状态流重载立即失效重算。
+- **失败草稿**：整组写入包在一个 Dexie 事务里，失败即整体回滚，操作意图随后写入 `fermentDrafts`；发酵页可「继续合并 / 丢弃」，关掉页面再打开草稿仍在。
 - **首屏自动播种**：`core/utils/db.ts` 的 `initDatabase()` 在 `recipes` 表为空时调用 `seedDatabase()`，灌入互相引用的三层演示数据（配方 → 麦芽/酒花/糖化步/煮沸投加 → 发酵读数 → 罐装批次），保证 6 个页面首次打开都有内容；播种幂等。
-- **状态流**：页面只 `dispatch` NgRx actions 并 `select` 状态流，所有读写最终由 `core/services/recipe.service.ts` → `IdbTableService` → Dexie 落库，跨页状态不留在组件字段。
+- **状态流**：页面只 `dispatch` NgRx actions 并 `select` 状态流，所有读写最终由 `core/services/recipe.service.ts` / `core/services/ferment-sync.service.ts` → `IdbTableService` → Dexie 落库，跨页状态不留在组件字段。
 - **无后端**：没有 API 服务、没有数据库容器；容器本身无状态，不挂载任何卷。
-- **级联规则**：删除配方会级联删除其麦芽、酒花、糖化步、煮沸投加、发酵读数与罐装批次。
+- **级联规则**：删除配方会级联删除其麦芽、酒花、糖化步、煮沸投加、发酵读数、罐装批次与相关的合并冲突、失败草稿。
