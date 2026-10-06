@@ -6,6 +6,7 @@ export const selectPackagingState = createFeatureSelector<PackagingState>('packa
 
 export const selectAllPackagings = createSelector(selectPackagingState, (state) => state.packagings);
 export const selectPackagingFilter = createSelector(selectPackagingState, (state) => state.filter);
+export const selectPackagingError = createSelector(selectPackagingState, (state) => state.error);
 
 export const selectFilteredPackagings = createSelector(
   selectAllPackagings,

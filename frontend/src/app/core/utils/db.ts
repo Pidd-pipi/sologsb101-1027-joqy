@@ -12,6 +12,7 @@ import type { MashStep } from '../models/mash-step.model';
 import type { BoilAdd } from '../models/boil-add.model';
 import type { Ferment } from '../models/ferment.model';
 import type { Packaging } from '../models/packaging.model';
+import type { FermentVariant, MergeDraft, RecipeActuals } from '../models/sync.model';
 import { nowIso } from './uuid';
 import { seedDatabase } from './seed';
 
@@ -19,10 +20,10 @@ import { seedDatabase } from './seed';
 export const DB_NAME = 'gbbrewhouse-db';
 
 /** 当前数据结构版本号（每次调整字段结构必须 +1 并补迁移） */
-export const DB_SCHEMA_VERSION = 1;
+export const DB_SCHEMA_VERSION = 2;
 
 /** 行结构修订号 */
-export const ROW_REVISION = 1;
+export const ROW_REVISION = 2;
 
 export interface Revisioned {
   revision: number;
@@ -35,8 +36,25 @@ export type MaltRow = Malt & Revisioned;
 export type HopRow = Hop & Revisioned;
 export type MashStepRow = MashStep & Revisioned;
 export type BoilAddRow = BoilAdd & Revisioned;
-export type FermentRow = Ferment & Revisioned;
+/**
+ * 发酵读数行：按「批次号 + 日期」守同一份实绩。
+ * 两个标签页把同一天读数改成不同值时，双方的值与来源都保留在 variants 中，主值不再被覆盖。
+ */
+export type FermentRow = Ferment &
+  Revisioned & {
+    /** 最近一次写入该主值的来源 */
+    sourceId?: string;
+    sourceLabel?: string;
+    /** 冲突时同时保留的双方值（非空时实绩计算以 variants 为准，主值仅作展示） */
+    variants?: FermentVariant[];
+    /** 该行进入编辑时的修订号（三方合并基线） */
+    baseRevision?: number;
+  };
 export type PackagingRow = Packaging & Revisioned;
+/** 配方实绩快照表行（recipeId 为主键，读数变动后立即失效并重算） */
+export type ActualsRow = RecipeActuals & Revisioned;
+/** 可续合并草稿（自带 createdAt / updatedAt，无需 Revisioned） */
+export type MergeDraftRow = MergeDraft;
 
 class GbBrewhouseDatabase extends Dexie {
   recipes!: Table<RecipeRow, string>;
@@ -46,11 +64,15 @@ class GbBrewhouseDatabase extends Dexie {
   boilAdds!: Table<BoilAddRow, string>;
   ferments!: Table<FermentRow, string>;
   packagings!: Table<PackagingRow, string>;
+  /** 配方实绩快照：recipeId 为主键，读数改动后 stale=true，重算后清回 false */
+  actuals!: Table<ActualsRow, string>;
+  /** 保存失败后整组回滚留下的可续合并草稿 */
+  mergeDrafts!: Table<MergeDraftRow, string>;
 
   constructor() {
     super(DB_NAME);
 
-    this.version(DB_SCHEMA_VERSION)
+    this.version(1)
       .stores({
         recipes: 'id, name, style, targetOg, updatedAt',
         malts: 'id, recipeId, name, ebc, type, updatedAt',
@@ -61,19 +83,25 @@ class GbBrewhouseDatabase extends Dexie {
         packagings: 'id, recipeId, batchNo, packDate, container, updatedAt'
       })
       .upgrade(async (tx) => {
-        // 结构迁移：为历史行补齐行修订号与时间戳；新建库时各表为空，迁移天然幂等
+        // v1 结构迁移：为历史行补齐行修订号与时间戳；新建库时各表为空，迁移天然幂等
         const tableNames = ['recipes', 'malts', 'hops', 'mashSteps', 'boilAdds', 'ferments', 'packagings'];
         for (const name of tableNames) {
           await tx
             .table(name)
             .toCollection()
             .modify((row: Record<string, unknown>) => {
-              row.revision = ROW_REVISION;
+              row.revision = 1;
               if (typeof row.createdAt !== 'number') row.createdAt = Date.now();
               if (typeof row.updatedAt !== 'number') row.updatedAt = row.createdAt;
             });
         }
       });
+
+    // v2：新增配方实绩快照表与可续合并草稿表；发酵行在读写层惰性补齐来源字段，无需改表结构
+    this.version(2).stores({
+      actuals: 'recipeId, stale, updatedAt',
+      mergeDrafts: 'id, kind, sourceId, updatedAt'
+    });
   }
 }
 
@@ -105,11 +133,11 @@ export async function listRecipes(): Promise<RecipeRow[]> {
   return rows.sort((a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN'));
 }
 
-/** 删除配方：级联删除麦芽、酒花、糖化步、煮沸投加、发酵读数与罐装批次 */
+/** 删除配方：级联删除麦芽、酒花、糖化步、煮沸投加、发酵读数、罐装批次与实绩快照 */
 export async function removeRecipe(id: string): Promise<void> {
   await db.transaction(
     'rw',
-    [db.recipes, db.malts, db.hops, db.mashSteps, db.boilAdds, db.ferments, db.packagings],
+    [db.recipes, db.malts, db.hops, db.mashSteps, db.boilAdds, db.ferments, db.packagings, db.actuals, db.mergeDrafts],
     async () => {
       await db.malts.where('recipeId').equals(id).delete();
       await db.hops.where('recipeId').equals(id).delete();
@@ -117,9 +145,47 @@ export async function removeRecipe(id: string): Promise<void> {
       await db.boilAdds.where('recipeId').equals(id).delete();
       await db.ferments.where('recipeId').equals(id).delete();
       await db.packagings.where('recipeId').equals(id).delete();
+      await db.actuals.where('recipeId').equals(id).delete();
+      // 该配方相关的发酵合并草稿一并清掉，避免指向已删除配方
+      const draftIds = (await db.mergeDrafts.toArray())
+        .filter((draft) => draft.changes?.some((change) => change.payload?.recipeId === id))
+        .map((draft) => draft.id);
+      if (draftIds.length > 0) await db.mergeDrafts.bulkDelete(draftIds);
       await db.recipes.delete(id);
     }
   );
+}
+
+/* ---------------------------- 配方实绩快照 ---------------------------- */
+
+export function listActuals(): Promise<ActualsRow[]> {
+  return db.actuals.toArray();
+}
+
+export function getActuals(recipeId: string): Promise<ActualsRow | undefined> {
+  return db.actuals.get(recipeId);
+}
+
+export async function putActuals(row: ActualsRow): Promise<void> {
+  await db.actuals.put(row);
+}
+
+/* ----------------------------- 合并草稿 ----------------------------- */
+
+export function listMergeDrafts(): Promise<MergeDraftRow[]> {
+  return db.mergeDrafts.toArray().then((rows) => rows.sort((a, b) => b.updatedAt - a.updatedAt));
+}
+
+export function getMergeDraft(id: string): Promise<MergeDraftRow | undefined> {
+  return db.mergeDrafts.get(id);
+}
+
+export async function putMergeDraft(draft: MergeDraftRow): Promise<void> {
+  await db.mergeDrafts.put(draft);
+}
+
+export function deleteMergeDraft(id: string): Promise<void> {
+  return db.mergeDrafts.delete(id);
 }
 
 /* --------------------------- 整库导入导出 --------------------------- */
@@ -177,7 +243,17 @@ function stamp<T>(row: T): T & Revisioned {
 export async function importSnapshot(snapshot: DatabaseSnapshot): Promise<void> {
   await db.transaction(
     'rw',
-    [db.recipes, db.malts, db.hops, db.mashSteps, db.boilAdds, db.ferments, db.packagings],
+    [
+      db.recipes,
+      db.malts,
+      db.hops,
+      db.mashSteps,
+      db.boilAdds,
+      db.ferments,
+      db.packagings,
+      db.actuals,
+      db.mergeDrafts
+    ],
     async () => {
       await Promise.all([
         db.recipes.clear(),
@@ -186,7 +262,10 @@ export async function importSnapshot(snapshot: DatabaseSnapshot): Promise<void> 
         db.mashSteps.clear(),
         db.boilAdds.clear(),
         db.ferments.clear(),
-        db.packagings.clear()
+        db.packagings.clear(),
+        // 实绩快照与合并草稿不随备份导入：实绩由当前读数重算，草稿需由酿酒师重新提交
+        db.actuals.clear(),
+        db.mergeDrafts.clear()
       ]);
       await db.recipes.bulkPut(snapshot.recipes.map(stamp));
       await db.malts.bulkPut(snapshot.malts.map(stamp));
@@ -203,7 +282,17 @@ export async function importSnapshot(snapshot: DatabaseSnapshot): Promise<void> 
 export async function resetDatabase(): Promise<void> {
   await db.transaction(
     'rw',
-    [db.recipes, db.malts, db.hops, db.mashSteps, db.boilAdds, db.ferments, db.packagings],
+    [
+      db.recipes,
+      db.malts,
+      db.hops,
+      db.mashSteps,
+      db.boilAdds,
+      db.ferments,
+      db.packagings,
+      db.actuals,
+      db.mergeDrafts
+    ],
     async () => {
       await Promise.all([
         db.recipes.clear(),
@@ -212,7 +301,9 @@ export async function resetDatabase(): Promise<void> {
         db.mashSteps.clear(),
         db.boilAdds.clear(),
         db.ferments.clear(),
-        db.packagings.clear()
+        db.packagings.clear(),
+        db.actuals.clear(),
+        db.mergeDrafts.clear()
       ]);
     }
   );
@@ -221,14 +312,16 @@ export async function resetDatabase(): Promise<void> {
 
 /** 各表行数统计 */
 export async function countAll(): Promise<Record<string, number>> {
-  const [recipes, malts, hops, mashSteps, boilAdds, ferments, packagings] = await Promise.all([
+  const [recipes, malts, hops, mashSteps, boilAdds, ferments, packagings, actuals, mergeDrafts] = await Promise.all([
     db.recipes.count(),
     db.malts.count(),
     db.hops.count(),
     db.mashSteps.count(),
     db.boilAdds.count(),
     db.ferments.count(),
-    db.packagings.count()
+    db.packagings.count(),
+    db.actuals.count(),
+    db.mergeDrafts.count()
   ]);
-  return { recipes, malts, hops, mashSteps, boilAdds, ferments, packagings };
+  return { recipes, malts, hops, mashSteps, boilAdds, ferments, packagings, actuals, mergeDrafts };
 }

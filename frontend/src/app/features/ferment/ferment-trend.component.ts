@@ -1,4 +1,4 @@
-/** /ferment 发酵比重与双乙酰还原跟踪：趋势读数与超温标记 */
+/** /ferment 发酵比重与双乙酰还原跟踪：趋势读数、跨标签页合并、冲突裁决与草稿续合并 */
 import { CommonModule } from '@angular/common';
 import { ChangeDetectionStrategy, Component, OnInit, computed, inject } from '@angular/core';
 import { FormsModule } from '@angular/forms';
@@ -21,23 +21,46 @@ import {
   FERMENT_STATES,
   type Ferment
 } from '../../core/models/ferment.model';
+import type { FermentBase, FermentChange, FermentVariant } from '../../core/models/sync.model';
 import {
   filtersToQueryParams,
   queryParamsToFilters,
   type FilterModel,
   type FilterSelectConfig
 } from '../../core/models/filter.model';
+import { SyncMergeService } from '../../core/services/sync-merge.service';
 import { FermentActions } from '../../core/state/ferment/ferment.actions';
 import {
   selectAllFerments,
   selectBatchNumbers,
+  selectConflictRows,
   selectCurrentBatchFerments,
   selectCurrentBatchMetrics,
+  selectFermentError,
   selectFermentFilter,
-  selectSelectedBatchNo
+  selectFermentNotice,
+  selectMergeDrafts,
+  selectSelectedBatchNo,
+  selectStaleRecipeIds
 } from '../../core/state/ferment/ferment.selectors';
 import { selectAllRecipes, selectSelectedRecipeId } from '../../core/state/recipe/recipe.selectors';
 import { RecipeActions } from '../../core/state/recipe/recipe.actions';
+import type { FermentRow } from '../../core/utils/db';
+
+/** 表格里一条可显示的读数（冲突行展开成多条，各自标注来源） */
+interface DisplayRow {
+  key: string;
+  date: string;
+  gravity: number;
+  tempC: number;
+  diacetylPpm: number;
+  state: Ferment['state'];
+  sourceId: string;
+  sourceLabel: string;
+  conflict: boolean;
+  rowId: string;
+  canEdit: boolean;
+}
 
 @Component({
   selector: 'app-ferment-trend',
@@ -64,7 +87,8 @@ import { RecipeActions } from '../../core/state/recipe/recipe.actions';
         <div>
           <h2 class="page__title">发酵比重与双乙酰还原跟踪</h2>
           <p class="page__subtitle">
-            逐日录入比重、温度与双乙酰；超过 24 ℃ 标记超温，双乙酰低于 {{ diacetylThreshold }} ppm 提示还原完成。
+            逐日录入比重、温度与双乙酰；两个标签页同改同一天读数时双方值与来源都会保留。当前来源：
+            <strong>{{ sourceLabel }}</strong>
           </p>
         </div>
         <button mat-flat-button color="primary" type="button" (click)="openCreate()" [disabled]="recipes().length === 0">
@@ -72,6 +96,53 @@ import { RecipeActions } from '../../core/state/recipe/recipe.actions';
           录入读数
         </button>
       </div>
+
+      @if (notice(); as text) {
+        <div class="banner banner--ok">
+          <mat-icon>sync</mat-icon><span>{{ text }}</span>
+        </div>
+      }
+      @if (error(); as text) {
+        <div class="banner banner--err">
+          <mat-icon>warning</mat-icon><span>{{ text }}</span>
+        </div>
+      }
+
+      @if (drafts().length > 0) {
+        <mat-card appearance="outlined" class="draft-card">
+          <mat-card-content>
+            <div class="draft-head">
+              <div>
+                <strong>有 {{ drafts().length }} 组未完成的合并草稿</strong>
+                <span class="muted">（上次保存失败已整组回滚，改动都在草稿里，可接着合并）</span>
+              </div>
+            </div>
+            @for (draft of drafts(); track draft.id) {
+              <div class="draft-row">
+                <div class="draft-row__text">
+                  <div>{{ draft.summary }}</div>
+                  <div class="muted">
+                    来源 {{ draft.source.sourceLabel }} · 失败原因：{{ draft.lastError }} · 已尝试 {{ draft.attempts }} 次
+                  </div>
+                </div>
+                <div class="draft-row__actions">
+                  <button mat-flat-button color="primary" type="button" (click)="retryDraft(draft.id)">继续合并</button>
+                  <button mat-button type="button" (click)="discardDraft(draft.id)">放弃草稿</button>
+                </div>
+              </div>
+            }
+          </mat-card-content>
+        </mat-card>
+      }
+
+      @if (currentBatchConflicts().length > 0) {
+        <mat-card appearance="outlined" class="conflict-card">
+          <mat-card-content>
+            <strong>{{ currentBatchConflicts().length }} 天读数存在双来源冲突</strong>
+            <span class="muted">（双方值都已保留并参与实绩，裁决后以选定值为准）</span>
+          </mat-card-content>
+        </mat-card>
+      }
 
       <div class="badge-row">
         <app-stat-badge label="批次数" [value]="batches().length" suffix="个" tone="primary" icon="inventory" />
@@ -101,6 +172,9 @@ import { RecipeActions } from '../../core/state/recipe/recipe.actions';
             @if (metrics().stuck) {
               <span class="hint hint--warn">疑似发酵停滞：末尾两次比重下降速率低于 0.002</span>
             }
+            @if (stale()) {
+              <span class="hint hint--stale">实绩已失效，正在按最新读数重算…</span>
+            }
           </div>
         </mat-card-content>
       </mat-card>
@@ -122,10 +196,10 @@ import { RecipeActions } from '../../core/state/recipe/recipe.actions';
         ></app-empty-panel>
       } @else {
         <mat-card appearance="outlined">
-          <mat-card-header><mat-card-title>比重趋势（条高按比重区间归一）</mat-card-title></mat-card-header>
+          <mat-card-header><mat-card-title>比重趋势（条高按比重区间归一，冲突双方值都画）</mat-card-title></mat-card-header>
           <mat-card-content>
             <div class="trend">
-              @for (point of metrics().points; track point.date) {
+              @for (point of metrics().points; track point.date + '-' + point.gravity) {
                 <div class="trend__item" [title]="point.date + ' · ' + point.gravity">
                   <div
                     class="trend__fill"
@@ -140,7 +214,7 @@ import { RecipeActions } from '../../core/state/recipe/recipe.actions';
         </mat-card>
 
         <mat-card appearance="outlined">
-          <mat-card-header><mat-card-title>读数明细</mat-card-title></mat-card-header>
+          <mat-card-header><mat-card-title>读数明细（同一批次同一天的双方值分行保留）</mat-card-title></mat-card-header>
           <mat-card-content>
             <table class="data-table">
               <thead>
@@ -151,23 +225,28 @@ import { RecipeActions } from '../../core/state/recipe/recipe.actions';
                   <th>双乙酰 ppm</th>
                   <th>下降速率 / 日</th>
                   <th>阶段</th>
-                  <th>记录</th>
+                  <th>来源</th>
                   <th>操作</th>
                 </tr>
               </thead>
               <tbody>
-                @for (reading of currentReadings(); track reading.id) {
-                  <tr>
-                    <td>{{ reading.date }}</td>
-                    <td>{{ reading.gravity }}</td>
-                    <td [class.over-temp]="reading.tempC > 24">{{ reading.tempC }}</td>
-                    <td>{{ reading.diacetylPpm }}</td>
-                    <td>{{ declineOf(reading.date) }}</td>
-                    <td><app-style-tag [value]="reading.state"></app-style-tag></td>
-                    <td class="muted">{{ reading.batchNo }}</td>
+                @for (row of displayRows(); track row.key) {
+                  <tr [class.row-conflict]="row.conflict">
+                    <td>{{ row.date }}</td>
+                    <td>{{ row.gravity }}</td>
+                    <td [class.over-temp]="row.tempC > 24">{{ row.tempC }}</td>
+                    <td>{{ row.diacetylPpm }}</td>
+                    <td>{{ declineOf(row.date) }}</td>
+                    <td><app-style-tag [value]="row.state"></app-style-tag></td>
+                    <td class="muted">{{ row.sourceLabel }}</td>
                     <td>
-                      <button mat-button type="button" (click)="edit(reading)">编辑</button>
-                      <button mat-button color="warn" type="button" (click)="remove(reading)">删除</button>
+                      @if (row.conflict) {
+                        <button mat-button color="primary" type="button" (click)="resolve(row, 'this')">采用此值</button>
+                        <button mat-button color="warn" type="button" (click)="removeReading(row)">删除</button>
+                      } @else {
+                        <button mat-button type="button" (click)="editRow(row)">编辑</button>
+                        <button mat-button color="warn" type="button" (click)="removeReading(row)">删除</button>
+                      }
                     </td>
                   </tr>
                 }
@@ -179,7 +258,9 @@ import { RecipeActions } from '../../core/state/recipe/recipe.actions';
 
       @if (formVisible) {
         <mat-card appearance="outlined">
-          <mat-card-header><mat-card-title>{{ editingId ? '编辑读数' : '录入读数' }}</mat-card-title></mat-card-header>
+          <mat-card-header>
+            <mat-card-title>{{ editingContext ? '编辑读数（基线已记录，保存时三方合并）' : '录入读数' }}</mat-card-title>
+          </mat-card-header>
           <mat-card-content>
             <div class="form-grid">
               <mat-form-field appearance="outline">
@@ -219,10 +300,11 @@ import { RecipeActions } from '../../core/state/recipe/recipe.actions';
                 </mat-select>
               </mat-form-field>
             </div>
+            <p class="muted">按「批次号 + 日期」归并：与另一标签页不冲突的读数直接合并，同改一天且值不同时双方值都保留。</p>
           </mat-card-content>
           <mat-card-actions align="end">
             <button mat-button type="button" (click)="formVisible = false">取消</button>
-            <button mat-flat-button color="primary" type="button" (click)="submit()">保存</button>
+            <button mat-flat-button color="primary" type="button" (click)="submit()">保存并合并</button>
           </mat-card-actions>
         </mat-card>
       }
@@ -253,6 +335,49 @@ import { RecipeActions } from '../../core/state/recipe/recipe.actions';
       .hint--warn {
         background: #fbe6c8;
         color: #7a4a12;
+      }
+      .hint--stale {
+        background: #fde9c8;
+        color: #8a5a00;
+      }
+      .banner {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        border-radius: 8px;
+        padding: 8px 14px;
+        margin-bottom: 12px;
+        font-size: 13px;
+      }
+      .banner--ok {
+        background: #e2f0d9;
+        color: #2f5a24;
+      }
+      .banner--err {
+        background: #fdecea;
+        color: #a5281b;
+      }
+      .draft-card,
+      .conflict-card {
+        margin-bottom: 12px;
+        border-color: #c98a34;
+      }
+      .draft-head {
+        margin-bottom: 8px;
+      }
+      .draft-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
+        border-top: 1px dashed var(--brew-border);
+        padding: 8px 0;
+      }
+      .draft-row__text {
+        font-size: 13px;
+      }
+      .row-conflict {
+        background: #fff7e8;
       }
       .trend {
         display: flex;
@@ -296,9 +421,12 @@ export class FermentTrendComponent implements OnInit {
   private readonly router = inject(Router);
   private readonly route = inject(ActivatedRoute);
   private readonly snack = inject(MatSnackBar);
+  private readonly sync = inject(SyncMergeService);
 
   readonly diacetylThreshold = DIACETYL_THRESHOLD;
   readonly fermentStates = FERMENT_STATES;
+  readonly sourceLabel = this.sync.getSource().sourceLabel;
+
   readonly metrics = this.store.selectSignal(selectCurrentBatchMetrics);
   readonly batches = this.store.selectSignal(selectBatchNumbers);
   readonly selectedBatchNo = this.store.selectSignal(selectSelectedBatchNo);
@@ -306,15 +434,27 @@ export class FermentTrendComponent implements OnInit {
   readonly recipes = this.store.selectSignal(selectAllRecipes);
   readonly selectedRecipeId = this.store.selectSignal(selectSelectedRecipeId);
   readonly allFerments = this.store.selectSignal(selectAllFerments);
+  readonly conflicts = this.store.selectSignal(selectConflictRows);
+  readonly drafts = this.store.selectSignal(selectMergeDrafts);
+  readonly notice = this.store.selectSignal(selectFermentNotice);
+  readonly error = this.store.selectSignal(selectFermentError);
+  readonly staleRecipeIds = this.store.selectSignal(selectStaleRecipeIds);
 
   readonly currentReadings = this.store.selectSignal(selectCurrentBatchFerments);
+
+  /** 当前批次内的冲突天数（横幅用） */
+  readonly currentBatchConflicts = computed(() => {
+    const batchNo = this.selectedBatchNo();
+    return this.conflicts().filter((row) => row.batchNo === batchNo);
+  });
 
   readonly selects: FilterSelectConfig[] = [
     { key: 'states', label: '阶段', options: FERMENT_STATES.map((state) => ({ label: state, value: state })) }
   ];
 
   formVisible = false;
-  editingId: string | null = null;
+  /** 编辑时记录的行与基线；新建时为 null */
+  editingContext: { rowId: string; base: FermentBase } | null = null;
   form: Omit<Ferment, 'id'> = createEmptyFerment();
 
   ngOnInit(): void {
@@ -327,6 +467,66 @@ export class FermentTrendComponent implements OnInit {
     this.store.dispatch(FermentActions.setFilter({ filter: queryParamsToFilters(params, ['states']) }));
     const batch = this.route.snapshot.queryParamMap.get('batchNo');
     if (batch) this.store.dispatch(FermentActions.selectBatch({ batchNo: batch }));
+  }
+
+  /** 当前批次是否有正在重算的实绩 */
+  stale(): boolean {
+    const ids = new Set(this.allFerments().map((row) => row.recipeId));
+    return this.staleRecipeIds().some((id) => ids.has(id));
+  }
+
+  /** 把读数行展开成表格行：冲突行按来源展开成多条 */
+  displayRows(): DisplayRow[] {
+    const sourceId = this.sync.getSource().sourceId;
+    const rows: DisplayRow[] = [];
+    for (const reading of this.currentReadings()) {
+      const variants = reading.variants ?? [];
+      if (variants.length > 1) {
+        variants
+          .slice()
+          .sort((a, b) => b.savedAt - a.savedAt)
+          .forEach((variant, index) => {
+            rows.push(this.variantToRow(reading, variant, true, index, sourceId));
+          });
+      } else {
+        rows.push({
+          key: `${reading.id}-main`,
+          rowId: reading.id,
+          date: reading.date,
+          gravity: reading.gravity,
+          tempC: reading.tempC,
+          diacetylPpm: reading.diacetylPpm,
+          state: reading.state,
+          sourceId: reading.sourceId ?? 'legacy',
+          sourceLabel: reading.sourceLabel ?? '历史记录',
+          conflict: false,
+          canEdit: true
+        });
+      }
+    }
+    return rows;
+  }
+
+  private variantToRow(
+    reading: FermentRow,
+    variant: FermentVariant,
+    conflict: boolean,
+    index: number,
+    currentSourceId: string
+  ): DisplayRow {
+    return {
+      key: `${reading.id}-variant-${index}-${variant.sourceId}`,
+      rowId: reading.id,
+      date: reading.date,
+      gravity: variant.gravity,
+      tempC: variant.tempC,
+      diacetylPpm: variant.diacetylPpm,
+      state: variant.state,
+      sourceId: variant.sourceId,
+      sourceLabel: variant.sourceLabel,
+      conflict,
+      canEdit: variant.sourceId === currentSourceId
+    };
   }
 
   selectBatch(batchNo: string): void {
@@ -347,23 +547,36 @@ export class FermentTrendComponent implements OnInit {
   }
 
   openCreate(): void {
-    this.editingId = null;
+    this.editingContext = null;
     this.form = createEmptyFerment();
     this.form.recipeId = this.selectedRecipeId() ?? this.recipes()[0]?.id ?? '';
     this.form.batchNo = this.selectedBatchNo() ?? '';
     this.formVisible = true;
   }
 
-  edit(reading: Ferment): void {
-    this.editingId = reading.id;
-    this.form = {
-      batchNo: reading.batchNo,
-      recipeId: reading.recipeId,
-      date: reading.date,
+  /** 编辑表格里的某一条值（主值或当前来源的冲突变体），基线取该值当时的快照 */
+  editRow(row: DisplayRow): void {
+    const reading = this.allFerments().find((item) => item.id === row.rowId);
+    if (!reading) return;
+    const variant = reading.variants?.find((item) => item.sourceId === row.sourceId);
+    const baseline = variant ?? {
       gravity: reading.gravity,
       tempC: reading.tempC,
       diacetylPpm: reading.diacetylPpm,
       state: reading.state
+    };
+    this.editingContext = {
+      rowId: reading.id,
+      base: { revision: reading.revision, snapshot: { ...baseline } }
+    };
+    this.form = {
+      batchNo: reading.batchNo,
+      recipeId: reading.recipeId,
+      date: reading.date,
+      gravity: baseline.gravity,
+      tempC: baseline.tempC,
+      diacetylPpm: baseline.diacetylPpm,
+      state: baseline.state
     };
     this.formVisible = true;
   }
@@ -377,18 +590,46 @@ export class FermentTrendComponent implements OnInit {
       this.snack.open('比重应在 0.98 – 1.2 之间', '关闭', { duration: 2200 });
       return;
     }
-    if (this.editingId) {
-      this.store.dispatch(FermentActions.updateFerment({ id: this.editingId, patch: { ...this.form } }));
-    } else {
-      this.store.dispatch(FermentActions.createFerment({ payload: { ...this.form } }));
-    }
+    const change: FermentChange = {
+      op: 'upsert',
+      id: this.editingContext?.rowId,
+      payload: { ...this.form },
+      base: this.editingContext?.base
+    };
+    this.store.dispatch(FermentActions.submitChanges({ changes: [change] }));
     this.formVisible = false;
+    this.editingContext = null;
     this.store.dispatch(FermentActions.selectBatch({ batchNo: this.form.batchNo }));
   }
 
-  remove(reading: Ferment): void {
-    if (!window.confirm(`删除 ${reading.date} 的读数？`)) return;
-    this.store.dispatch(FermentActions.deleteFerment({ id: reading.id }));
+  /** 裁决冲突：采用该来源值作为唯一实绩 */
+  resolve(row: DisplayRow, _choice: 'this'): void {
+    this.store.dispatch(
+      FermentActions.resolveConflict({
+        rowId: row.rowId,
+        chosen: { gravity: row.gravity, tempC: row.tempC, diacetylPpm: row.diacetylPpm, state: row.state }
+      })
+    );
+  }
+
+  removeReading(row: DisplayRow): void {
+    if (!window.confirm(`删除 ${row.date} 的该条读数值？冲突时仅删除该来源的值。`)) return;
+    const reading = this.allFerments().find((item) => item.id === row.rowId);
+    if (reading && (reading.variants?.length ?? 0) > 1) {
+      // 冲突行：只移除这一个来源的值（服务在剩一个值时自动收敛为主值）
+      this.store.dispatch(FermentActions.removeVariant({ rowId: reading.id, sourceId: row.sourceId }));
+      return;
+    }
+    this.store.dispatch(FermentActions.submitChanges({ changes: [{ op: 'delete', id: row.rowId }] }));
+  }
+
+  retryDraft(draftId: string): void {
+    this.store.dispatch(FermentActions.retryDraft({ draftId }));
+  }
+
+  discardDraft(draftId: string): void {
+    if (!window.confirm('放弃该草稿后，这组未合并的改动将被移除，是否继续？')) return;
+    this.store.dispatch(FermentActions.discardDraft({ draftId }));
   }
 
   onFilterChange(next: FilterModel): void {

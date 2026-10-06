@@ -10,7 +10,8 @@ import type { BoilAdd } from '../models/boil-add.model';
 import type { Ferment } from '../models/ferment.model';
 import type { Packaging } from '../models/packaging.model';
 import { DB_NAME, DB_SCHEMA_VERSION, db } from './db';
-import { abvFromGravity, apparentAttenuation, totalGrainKg, weightedEbc } from './brew';
+import { totalGrainKg, weightedEbc } from './brew';
+import { effectiveReadings, recipeActuals } from './actuals';
 import { nowIso } from './uuid';
 
 /** 配方实绩档案 */
@@ -64,8 +65,11 @@ export async function buildRecipeArchive(recipeId: string): Promise<RecipeArchiv
     db.packagings.where('recipeId').equals(recipeId).toArray()
   ]);
   const sortedFerments = [...ferments].sort((a, b) => a.date.localeCompare(b.date));
-  const og = sortedFerments.length > 0 ? sortedFerments[0].gravity : recipe.targetOg;
-  const fg = sortedFerments.length > 0 ? sortedFerments[sortedFerments.length - 1].gravity : recipe.targetFg;
+  // 实绩按「批次号 + 日期」归并：同改一天的冲突双方值都纳入档案
+  const computed = recipeActuals(ferments, recipeId);
+  const effective = effectiveReadings(ferments);
+  const og = computed.og || recipe.targetOg;
+  const fg = computed.fg || recipe.targetFg;
 
   return {
     name: DB_NAME,
@@ -83,13 +87,13 @@ export async function buildRecipeArchive(recipeId: string): Promise<RecipeArchiv
       hopCount: hops.length,
       mashStepCount: mashSteps.length,
       boilAddCount: boilAdds.length,
-      fermentCount: ferments.length,
       grainKg: totalGrainKg(recipe.batchSizeL, recipe.targetOg),
       avgEbc: weightedEbc(malts),
       og,
       fg,
-      abv: abvFromGravity(og, fg),
-      attenuation: apparentAttenuation(og, fg),
+      abv: computed.abv,
+      attenuation: computed.attenuation,
+      fermentCount: effective.length,
       packagedQuantity: packagings.reduce((sum, item) => sum + item.quantity, 0)
     }
   };

@@ -106,9 +106,12 @@ sologsb101-1027/
 
 ## 六、数据存储说明
 
-- **IndexedDB 库名**：`gbbrewhouse-db`（Dexie 封装），结构版本号 `version(1)`，并带 `upgrade()` 迁移逻辑（为历史行补齐行修订号与时间戳）。
-- **分表存储**：`recipes` 配方、`malts` 麦芽、`hops` 酒花、`mashSteps` 糖化步、`boilAdds` 煮沸投加、`ferments` 发酵读数、`packagings` 罐装批次，共 7 张表；每行带 `revision` / `createdAt` / `updatedAt`。
+- **IndexedDB 库名**：`gbbrewhouse-db`（Dexie 封装），结构版本号 `version(2)`，并保留 `version(1) → version(2)` 的增量 `upgrade()` 迁移（v1 为历史行补齐行修订号与时间戳；v2 新增配方实绩快照表与可续合并草稿表，旧库打开自动升级）。
+- **分表存储**：`recipes` 配方、`malts` 麦芽、`hops` 酒花、`mashSteps` 糖化步、`boilAdds` 煮沸投加、`ferments` 发酵读数、`packagings` 罐装批次，以及 v2 的 `actuals` 配方实绩快照、`mergeDrafts` 可续合并草稿，共 9 张表；每行带 `revision` / `createdAt` / `updatedAt`。
 - **首屏自动播种**：`core/utils/db.ts` 的 `initDatabase()` 在 `recipes` 表为空时调用 `seedDatabase()`，灌入互相引用的三层演示数据（配方 → 麦芽/酒花/糖化步/煮沸投加 → 发酵读数 → 罐装批次），保证 6 个页面首次打开都有内容；播种幂等。
-- **状态流**：页面只 `dispatch` NgRx actions 并 `select` 状态流，所有读写最终由 `core/services/recipe.service.ts` → `IdbTableService` → Dexie 落库，跨页状态不留在组件字段。
+- **跨标签页守同一份实绩**：发酵读数与罐装批次均以「批次号 + 日期」为自然键归并（`core/services/sync-merge.service.ts`）。两个标签页同改同一批次同一天的读数且值不同时，双方的值与来源（标签页 A/B，存 sessionStorage）都保留在该行 `variants` 中，页面上可「采用此值」裁决；未冲突的补录 / 修正直接合并进同一行。提交后通过 `BroadcastChannel` 通知其它标签页即时重装载（不支持时退化为刷新）。
+- **实绩失效与酒精度重算**：任一读数改动发起时，相关配方的实绩快照立即置 `stale`（配方卡显示「实绩失效 · 重算中」），随后在同一 Dexie 事务内按归并读数重算 OG / FG / ABV，并回写同批次罐装批次的 `abv`。
+- **整组回滚与可续草稿**：一组读数 / 罐装保存是单个事务，任一写入失败整组回滚；整组改动与来源写入独立的 `mergeDrafts` 表，发酵页与罐装页顶部出现「继续合并 / 放弃」横幅，关掉页面再打开仍可接着合并。
+- **状态流**：页面只 `dispatch` NgRx actions 并 `select` 状态流，所有读写最终由 `core/services/sync-merge.service.ts`（合并 / 事务 / 草稿 / 重算）与 `recipe.service.ts` → Dexie 落库，跨页状态不留在组件字段。
 - **无后端**：没有 API 服务、没有数据库容器；容器本身无状态，不挂载任何卷。
-- **级联规则**：删除配方会级联删除其麦芽、酒花、糖化步、煮沸投加、发酵读数与罐装批次。
+- **级联规则**：删除配方会级联删除其麦芽、酒花、糖化步、煮沸投加、发酵读数、罐装批次与配方实绩快照。

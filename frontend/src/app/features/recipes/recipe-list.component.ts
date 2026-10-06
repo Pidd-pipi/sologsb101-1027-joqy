@@ -26,9 +26,10 @@ import {
   selectSelectedRecipe
 } from '../../core/state/recipe/recipe.selectors';
 import { selectAllMalts } from '../../core/state/ingredients/ingredients.selectors';
-import { selectAllFerments } from '../../core/state/ferment/ferment.selectors';
+import { selectAllFerments, selectStaleRecipeIds } from '../../core/state/ferment/ferment.selectors';
 import { selectAllPackagings } from '../../core/state/packaging/packaging.selectors';
-import { abvFromGravity, apparentAttenuation, ebcDeviation, totalGrainKg } from '../../core/utils/brew';
+import { ebcDeviation, totalGrainKg } from '../../core/utils/brew';
+import { recipeActuals } from '../../core/utils/actuals';
 
 @Component({
   selector: 'app-recipe-list',
@@ -116,7 +117,12 @@ import { abvFromGravity, apparentAttenuation, ebcDeviation, totalGrainKg } from 
                     </tr>
                     <tr>
                       <th>实绩 OG / FG</th>
-                      <td>{{ realizedOg(recipe.id) }} / {{ realizedFg(recipe.id) }}</td>
+                      <td>
+                        {{ realizedOg(recipe.id) }} / {{ realizedFg(recipe.id) }}
+                        @if (isActualsStale(recipe.id)) {
+                          <span class="stale-tag">实绩失效 · 重算中</span>
+                        }
+                      </td>
                     </tr>
                     <tr>
                       <th>实绩 ABV / 发酵度</th>
@@ -211,6 +217,8 @@ export class RecipeListComponent implements OnInit {
   private readonly allMalts = this.store.selectSignal(selectAllMalts);
   private readonly allFerments = this.store.selectSignal(selectAllFerments);
   private readonly allPackagings = this.store.selectSignal(selectAllPackagings);
+  /** 读数一改就立即失效的配方实绩（重算完成后清空） */
+  private readonly staleRecipeIds = this.store.selectSignal(selectStaleRecipeIds);
 
   formVisible = false;
   editingId: string | null = null;
@@ -244,13 +252,9 @@ export class RecipeListComponent implements OnInit {
     this.store.dispatch(RecipeActions.setFilter({ filter: queryParamsToFilters(params, ['styles']) }));
   }
 
-  /** 实际发酵首末读数 */
-  private realized(recipeId: string): { og: number; fg: number } {
-    const rows = this.allFerments()
-      .filter((item) => item.recipeId === recipeId)
-      .sort((a, b) => a.date.localeCompare(b.date));
-    if (rows.length === 0) return { og: 0, fg: 0 };
-    return { og: rows[0].gravity, fg: rows[rows.length - 1].gravity };
+  /** 实际发酵实绩：按批次号 + 日期归并读数（冲突时双方值都参与） */
+  private realized(recipeId: string): { og: number; fg: number; abv: number; attenuation: number } {
+    return recipeActuals(this.allFerments(), recipeId);
   }
 
   realizedOg(recipeId: string): number {
@@ -262,13 +266,16 @@ export class RecipeListComponent implements OnInit {
   }
 
   realizedAbv(recipeId: string): number {
-    const { og, fg } = this.realized(recipeId);
-    return abvFromGravity(og, fg);
+    return this.realized(recipeId).abv;
   }
 
   realizedAttenuation(recipeId: string): number {
-    const { og, fg } = this.realized(recipeId);
-    return apparentAttenuation(og, fg);
+    return this.realized(recipeId).attenuation;
+  }
+
+  /** 该配方实绩是否已失效、正在按最新读数重算 */
+  isActualsStale(recipeId: string): boolean {
+    return this.staleRecipeIds().includes(recipeId);
   }
 
   maltCount(recipeId: string): number {

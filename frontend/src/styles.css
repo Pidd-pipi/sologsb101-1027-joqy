@@ -116,3 +116,15 @@ table.data-table th {
 .cdk-drag-placeholder {
   opacity: 0.35;
 }
+
+/* 配方实绩失效 / 重算提示（读数改动后立即出现，重算完成后消失） */
+.stale-tag {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 10px;
+  border-radius: 999px;
+  background: #fde9c8;
+  color: #8a5a00;
+  font-size: 11px;
+  font-weight: 600;
+}

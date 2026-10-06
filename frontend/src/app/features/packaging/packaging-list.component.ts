@@ -22,8 +22,16 @@ import {
   type FilterSelectConfig
 } from '../../core/models/filter.model';
 import { PackagingActions } from '../../core/state/packaging/packaging.actions';
-import { selectAllPackagings, selectFilteredPackagings, selectPackagingFilter } from '../../core/state/packaging/packaging.selectors';
-import { selectAllFerments } from '../../core/state/ferment/ferment.selectors';
+import {
+  selectAllPackagings,
+  selectFilteredPackagings,
+  selectPackagingError,
+  selectPackagingFilter
+} from '../../core/state/packaging/packaging.selectors';
+import {
+  selectAllFerments,
+  selectMergeDrafts
+} from '../../core/state/ferment/ferment.selectors';
 import { selectAllRecipes, selectSelectedRecipeId } from '../../core/state/recipe/recipe.selectors';
 import { RecipeActions } from '../../core/state/recipe/recipe.actions';
 import { FermentActions } from '../../core/state/ferment/ferment.actions';
@@ -45,7 +53,7 @@ import {
   serializeArchive,
   type RecipeArchive
 } from '../../core/utils/export';
-import { abvFromGravity } from '../../core/utils/brew';
+import { abvForBatch, recipeActuals } from '../../core/utils/actuals';
 
 @Component({
   selector: 'app-packaging-list',
@@ -95,6 +103,36 @@ import { abvFromGravity } from '../../core/utils/brew';
         (filtersChange)="onFilterChange($event)"
         (reset)="onResetFilter()"
       ></app-filter-bar>
+
+      @if (saveError(); as text) {
+        <div class="banner banner--err">
+          <mat-icon>warning</mat-icon><span>{{ text }}</span>
+        </div>
+      }
+
+      @if (drafts().length > 0) {
+        <mat-card appearance="outlined" class="draft-card">
+          <mat-card-content>
+            <strong>有 {{ drafts().length }} 组保存失败后回滚的草稿</strong>
+            <span class="muted">（改动未丢失，可接着合并；关掉页面再打开也在这里）</span>
+            @for (draft of drafts(); track draft.id) {
+              <div class="draft-row">
+                <div class="draft-row__text">
+                  <div>{{ draft.summary }}</div>
+                  <div class="muted">
+                    {{ draft.kind === 'ferment' ? '发酵读数' : '罐装批次' }} · 来源 {{ draft.source.sourceLabel }} ·
+                    {{ draft.lastError }}
+                  </div>
+                </div>
+                <div class="draft-row__actions">
+                  <button mat-flat-button color="primary" type="button" (click)="retryDraft(draft.id)">继续合并</button>
+                  <button mat-button type="button" (click)="discardDraft(draft.id)">放弃</button>
+                </div>
+              </div>
+            }
+          </mat-card-content>
+        </mat-card>
+      }
 
       @if (filtered().length === 0) {
         <app-empty-panel
@@ -263,6 +301,31 @@ import { abvFromGravity } from '../../core/utils/brew';
   `,
   styles: [
     `
+      .banner {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        border-radius: 8px;
+        padding: 8px 14px;
+        font-size: 13px;
+        background: #fdecea;
+        color: #a5281b;
+      }
+      .draft-card {
+        margin-bottom: 12px;
+        border-color: #c98a34;
+      }
+      .draft-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
+        border-top: 1px dashed var(--brew-border);
+        padding: 8px 0;
+      }
+      .draft-row__text {
+        font-size: 13px;
+      }
       .archive-actions {
         display: flex;
         flex-wrap: wrap;
@@ -303,9 +366,12 @@ export class PackagingListComponent implements OnInit {
   readonly filtered = this.store.selectSignal(selectFilteredPackagings);
   readonly allPackagings = this.store.selectSignal(selectAllPackagings);
   readonly filter = this.store.selectSignal(selectPackagingFilter);
+  readonly saveError = this.store.selectSignal(selectPackagingError);
   readonly recipes = this.store.selectSignal(selectAllRecipes);
   readonly selectedRecipeId = this.store.selectSignal(selectSelectedRecipeId);
   private readonly ferments = this.store.selectSignal(selectAllFerments);
+  /** 保存失败后整组回滚留下的可续合并草稿（罐装 + 发酵都可能有，关掉页面再打开仍在） */
+  readonly drafts = this.store.selectSignal(selectMergeDrafts);
 
   readonly selects: FilterSelectConfig[] = [
     { key: 'containers', label: '容器', options: CONTAINER_TYPES.map((item) => ({ label: item, value: item })) }
@@ -362,12 +428,10 @@ export class PackagingListComponent implements OnInit {
     return this.recipes().find((item) => item.id === recipeId)?.name ?? '配方已删除';
   }
 
+  /** 实绩按「批次号 + 日期」归并读数计算；配方下列多个批次时全部纳入 */
   private realized(recipeId: string): { og: number; fg: number } {
-    const rows = this.ferments()
-      .filter((item) => item.recipeId === recipeId)
-      .sort((a, b) => a.date.localeCompare(b.date));
-    if (rows.length === 0) return { og: 0, fg: 0 };
-    return { og: rows[0].gravity, fg: rows[rows.length - 1].gravity };
+    const actual = recipeActuals(this.ferments(), recipeId);
+    return { og: actual.og, fg: actual.fg };
   }
 
   realizedOg(recipeId: string): number {
@@ -378,15 +442,9 @@ export class PackagingListComponent implements OnInit {
     return this.realized(recipeId).fg;
   }
 
-  private abvForBatch(batchNo: string, recipeId: string): number {
-    const rows = this.ferments()
-      .filter((item) => item.batchNo === batchNo || (batchNo.length === 0 && item.recipeId === recipeId))
-      .sort((a, b) => a.date.localeCompare(b.date));
-    if (rows.length < 2) {
-      const fallback = this.realized(recipeId);
-      return abvFromGravity(fallback.og, fallback.fg);
-    }
-    return abvFromGravity(rows[0].gravity, rows[rows.length - 1].gravity);
+  /** 某批次的最终酒精度：由该批次发酵读数（含冲突双方值）归并回算 */
+  private abvForBatch(batchNo: string, _recipeId: string): number {
+    return abvForBatch(this.ferments(), batchNo);
   }
 
   fillAbv(): void {
@@ -422,13 +480,14 @@ export class PackagingListComponent implements OnInit {
       this.snack.open('请选择配方并填写批次号', '关闭', { duration: 2200 });
       return;
     }
-    if (this.editingId) {
-      this.store.dispatch(PackagingActions.updatePackaging({ id: this.editingId, patch: { ...this.form } }));
-    } else {
-      this.store.dispatch(PackagingActions.createPackaging({ payload: { ...this.form } }));
-    }
+    // 按「批次号 + 罐装日期」归并保存；ABV 由发酵读数当场重算，未冲突的改动直接合并
+    this.store.dispatch(
+      PackagingActions.submitPackaging({
+        upsert: { id: this.editingId ?? undefined, payload: { ...this.form } }
+      })
+    );
     this.formVisible = false;
-    this.snack.open('罐装批次已登记', '关闭', { duration: 2000 });
+    this.snack.open('罐装批次已按批次号归并保存，ABV 已按最新读数重算', '关闭', { duration: 2200 });
     void this.refreshCounts();
   }
 
@@ -436,6 +495,15 @@ export class PackagingListComponent implements OnInit {
     if (!window.confirm(`删除罐装批次「${row.batchNo}」？`)) return;
     this.store.dispatch(PackagingActions.deletePackaging({ id: row.id }));
     void this.refreshCounts();
+  }
+
+  retryDraft(draftId: string): void {
+    this.store.dispatch(FermentActions.retryDraft({ draftId }));
+  }
+
+  discardDraft(draftId: string): void {
+    if (!window.confirm('放弃该草稿后，这组未保存的改动将被移除，是否继续？')) return;
+    this.store.dispatch(FermentActions.discardDraft({ draftId }));
   }
 
   onArchiveRecipeChange(recipeId: string): void {
