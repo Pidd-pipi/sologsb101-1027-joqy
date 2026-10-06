@@ -1,0 +1,37 @@
+{
+  "name": "gbbrewhouse-frontend",
+  "private": true,
+  "version": "1.0.0",
+  "description": "精酿糖化配方与发酵比重台 - 纯前端 SPA（Angular 18 + TypeScript + Angular Material + RxJS + NgRx + Angular Router + Dexie）",
+  "scripts": {
+    "ng": "ng",
+    "start": "ng serve --port 22827",
+    "build": "ng build",
+    "watch": "ng build --watch --configuration development"
+  },
+  "dependencies": {
+    "@angular/animations": "^18.2.0",
+    "@angular/cdk": "^18.2.0",
+    "@angular/common": "^18.2.0",
+    "@angular/compiler": "^18.2.0",
+    "@angular/core": "^18.2.0",
+    "@angular/forms": "^18.2.0",
+    "@angular/material": "^18.2.0",
+    "@angular/platform-browser": "^18.2.0",
+    "@angular/platform-browser-dynamic": "^18.2.0",
+    "@angular/router": "^18.2.0",
+    "@ngrx/effects": "^18.1.0",
+    "@ngrx/store": "^18.1.0",
+    "@ngrx/store-devtools": "^18.1.0",
+    "dexie": "^4.0.11",
+    "rxjs": "~7.8.1",
+    "tslib": "^2.6.3",
+    "zone.js": "~0.14.10"
+  },
+  "devDependencies": {
+    "@angular-devkit/build-angular": "^18.2.0",
+    "@angular/cli": "^18.2.0",
+    "@angular/compiler-cli": "^18.2.0",
+    "typescript": "~5.5.4"
+  }
+}

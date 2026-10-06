@@ -1,0 +1,118 @@
+/* 精酿糖化配方与发酵比重台 · 全局样式 */
+@import '@angular/material/prebuilt-themes/indigo-pink.css';
+
+:root {
+  --brew-ink: #22301f;
+  --brew-primary: #3f6b3a;
+  --brew-bg: #f6f5ef;
+  --brew-border: #e2e0d3;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--brew-bg);
+  color: var(--brew-ink);
+  font-family: 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', system-ui, -apple-system, sans-serif;
+  font-size: 14px;
+}
+
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.page__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.page__title {
+  margin: 0 0 4px;
+  font-size: 20px;
+  font-weight: 700;
+}
+
+.page__subtitle {
+  margin: 0;
+  color: #6f7a68;
+  font-size: 13px;
+}
+
+.badge-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.card-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-weight: 600;
+}
+
+.muted {
+  color: #8f9a88;
+  font-size: 12px;
+}
+
+.grid-cards {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+}
+
+.form-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+}
+
+.full {
+  width: 100%;
+}
+
+table.data-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+table.data-table th,
+table.data-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--brew-border);
+  text-align: left;
+  vertical-align: top;
+}
+
+table.data-table th {
+  font-size: 12px;
+  color: #6f7a68;
+  font-weight: 600;
+}
+
+.drag-row {
+  cursor: grab;
+}
+
+.cdk-drag-preview {
+  box-shadow: 0 5px 20px rgba(0, 0, 0, 0.2);
+}
+
+.cdk-drag-placeholder {
+  opacity: 0.35;
+}
